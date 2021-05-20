@@ -243,6 +243,10 @@ def logdebug(msg):
     logging.debug("\033[36m{0}\033[0m\033[K".format(msg))
 
 
+def logtrace(msg):
+    logging.log(logging.TRACE, "\033[36m{0}\033[0m\033[K".format(msg))
+
+
 if WINDOWS:
     import ctypes
     from ctypes.wintypes import HANDLE, BOOL, DWORD, LPWSTR, LPVOID
@@ -452,7 +456,9 @@ def download_as_text(url):
         logwarn("Failed to retrieve data from {0}: {1}".format(url, err))
         return None
 
-    return data.decode("utf-8")
+    ret = data.decode("utf-8")
+    logtrace(f"GET {url}\n{ret}")
+    return ret
 
 
 def download_thumbnail(url, fname):
@@ -802,18 +808,26 @@ def get_download_urls(info, formats):
     urls = {}
 
     if info.dash_manifest_url:
+        logtrace(f"trying to use manifest at {info.dash_manifest_url}")
         manifest = download_as_text(info.dash_manifest_url)
 
         if manifest:
+            logtrace(f"got dash manifest: {manifest}")
             urls = get_urls_from_manifest(manifest)
 
             if urls:
+                logtrace(f"got urls from manifest: {urls}")
                 return urls
+            
+            logdebug(f"found no urls in manifest")
+        else:
+            logdebug(f"could not read manifest at {info.dash_manifest_url}")
 
     for fmt in formats:
         if "url" in fmt:
             urls[fmt["itag"]] = fmt["url"] + "&sq={0}"
 
+    logtrace(f"generated urls frmo adaptiveFormats: {urls}")
     return urls
 
 
@@ -1676,6 +1690,14 @@ Options:
     --debug
         Print a lot of extra information.
 
+    --trace
+        --debug plus WAY MORE stuff such as HTTP responses.
+        Only applies to --logfile (will never log trace to console).
+
+    --logfile FILENAME
+        Log to file in addition to the console.
+        If filename is "." (without quotes), autogenerate filename.
+
     --merge
         Automatically run the ffmpeg command for the downloaded streams
         when sigint is received. You will be prompted otherwise.
@@ -1791,6 +1813,8 @@ def main():
     write_thumb = False
     verbose = False
     debug = False
+    trace = False
+    logfile = None
     frag_files = True
     inet_family = 0
     merge_on_cancel = Action.ASK
@@ -1807,6 +1831,8 @@ def main():
                                        "thumbnail",
                                        "verbose",
                                        "debug",
+                                       "trace",
+                                       "logfile=",
                                        "vp9",
                                        "add-metadata",
                                        "ipv4",
@@ -1860,6 +1886,11 @@ def main():
             info.vp9 = True
         elif o == "--debug":
             debug = True
+        elif o == "--trace":
+            debug = True
+            trace = True
+        elif o == "--logfile":
+            logfile = a
         elif o == "--add-metadata":
             add_meta = True
         elif o == "--write-description":
@@ -1904,13 +1935,40 @@ def main():
             assert False, "Unhandled option"
 
     # Set up logging
+    logging.TRACE = 9
+    logging.addLevelName(logging.TRACE, "TRACE")
+
+    def logging_trace_impl(self, msg, *a, **ka):
+        if self.isEnabledFor(logging.TRACE):
+            self._log(logging.TRACE, msg, a, **ka)
+    
+    logging.Logger.trace = logging_trace_impl
+    
     loglevel = logging.WARNING
     if debug:
         loglevel = logging.DEBUG
     elif verbose:
         loglevel = logging.INFO
-
+    
     logging.basicConfig(format="\r%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S", level=loglevel)
+
+    if logfile:
+        if logfile == ".":
+            logfile = f'ytarchive-{time.time():.3f}-p{os.getpid()}-log.txt'
+        
+        logger = logging.getLogger()
+        if trace:
+            logger.setLevel(logging.TRACE)
+            for h in logger.handlers:
+                h.setLevel(logging.DEBUG)
+        
+        handler = logging.FileHandler(logfile, encoding='utf-8')
+        handler.setFormatter(logging.Formatter(
+            ' @ %(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
+            datefmt="%H%M%S"))
+        
+        logger.addHandler(handler)
+        loginfo(f"logging to {logfile}")
 
     patch_getaddrinfo(inet_family)
 
